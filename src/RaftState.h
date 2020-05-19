@@ -3,15 +3,18 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <condition_variable>
 
 
 struct RaftState {  
-  std::mutex m;
+  std::mutex data;
+  std::mutex heartbeat;
+  std::condition_variable heartbeat_cv;
 
   // Raft persistend state
   int currentTerm;
   int votedFor;
-  // log ?
+  std::vector<std::string> log;
   
   // Raft volatile state
   int commitIndex;

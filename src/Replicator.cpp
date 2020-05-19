@@ -13,6 +13,7 @@
 #include <chrono>
 #include <list>
 #include <mutex>
+#include <condition_variable>
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
@@ -64,27 +65,70 @@ void Replicator::poll(std::pair<std::shared_ptr<TTransport>, std::shared_ptr<Raf
     }
 }
 
-void Replicator::tick() {
-    int naptime = rand() % 30;
-    std::cout << this->port << ": Sleeping for " << naptime << " s" << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(naptime));
+void Replicator::follow() {
+    while (1) {
+        int naptime = rand() % 30;
+        std::cout << this->port << ": Sleeping for " << naptime << " s" << std::endl;
 
-    std::cout << this->port << ": triggering leader election!" << std::endl;
-    std::list<std::thread> waiting;
-    auto votes = std::make_shared<std::atomic_int>(0);
+        std::unique_lock<std::mutex> lock(this->state->heartbeat);
+        auto gate = this->state->heartbeat_cv.wait_for(lock, std::chrono::seconds(naptime));
 
-    const std::lock_guard<std::mutex> lock(this->state->m);
-    this->state->currentTerm++;
+        if (gate == std::cv_status::timeout) {
+            std::cout << this->port << ": triggering leader election!" << std::endl;
+            std::list<std::thread> waiting;
+            auto votes = std::make_shared<std::atomic_int>(1);
 
-    for (auto &client : this->others) {
-        waiting.push_back(std::thread(&Replicator::poll, this, client, votes));
+            const std::lock_guard<std::mutex> lock(this->state->data);
+            this->state->currentTerm++;
+            this->state->votedFor = this->port;
+
+            for (auto &client : this->others) {
+                waiting.push_back(std::thread(&Replicator::poll, this, client, votes));
+            }
+
+            for (auto &thread : waiting) {
+                thread.join();
+            }
+
+            std::cout << this->port << ": got " << *votes << " votes" << std::endl;
+            
+            if (*votes >= 3) {
+                this->lead();
+            }
+        } else {
+            std::cout << this->port << ": thud thud" << std::endl;
+        }
     }
+}
 
-    for (auto &thread : waiting) {
-        thread.join();
+void Replicator::update(std::pair<std::shared_ptr<TTransport>, std::shared_ptr<RaftClient>> ct) {
+   Reply r;
+   ct.first->open();
+   ct.second->AppendEntries(r, this->state->currentTerm, this->port, 0, 0, this->state->log, this->state->commitIndex);
+   ct.first->close();
+}
+
+void Replicator::lead() {
+    while(1) {
+        int naptime = rand() % 1000; 
+        std::cout << this->port << ": lead-sleeping for " << naptime << " ms" << std::endl;
+        std::unique_lock<std::mutex> lock(this->state->heartbeat, std::adopt_lock);
+        auto gate = this->state->heartbeat_cv.wait_for(lock, std::chrono::milliseconds(naptime));
+        
+        if (gate == std::cv_status::timeout) {
+            std::cout << "Sending heartbeats" << std::endl;
+            std::list<std::thread> waiting;
+            for (auto &client : this->others) {
+                waiting.push_back(std::thread(&Replicator::update, this, client));
+            }
+
+            for (auto &thread : waiting) {
+                thread.join();
+            }
+        } else {
+            break;
+        }
     }
-
-    std::cout << this->port << ": got " << *votes << " votes" << std::endl;
 }
 
 void Replicator::listen() {
@@ -93,7 +137,7 @@ void Replicator::listen() {
 }
 
 void Replicator::replicate() {
-  this->tickThread = std::make_shared<std::thread>(&Replicator::tick, this);
+  this->tickThread = std::make_shared<std::thread>(&Replicator::follow, this);
   this->tickThread->join();
 }
 

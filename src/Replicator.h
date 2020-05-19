@@ -34,7 +34,9 @@ class Replicator {
         std::shared_ptr<RaftState> state;
 
         void startServer();
-        void tick();
+        void lead();
+        void follow();
         
         void poll(std::pair<std::shared_ptr<TTransport>, std::shared_ptr<RaftClient>>, std::shared_ptr<std::atomic_int>);
+        void update(std::pair<std::shared_ptr<TTransport>, std::shared_ptr<RaftClient>>);
 };
